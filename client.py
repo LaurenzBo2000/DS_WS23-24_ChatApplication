@@ -1,26 +1,32 @@
 import socket
+import threading
 
-client_socket = socket.socket()
-port = 12345
-client_socket.connect(('141.70.164.107',port))
+class ChatClient:
+    def __init__(self, host, port):
+        self.host = host
+        self.port = port
+        self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
-#recieve connection message from server
-recv_msg = client_socket.recv(1024)
-print recv_msg
+    def connect(self):
+        self.client_socket.connect((self.host, self.port))
+        receive_thread = threading.Thread(target=self.receive)
+        receive_thread.start()
 
-#send user details to server
-send_msg = raw_input("Enter your user name(prefix with #):")
-client_socket.send(send_msg)
+    def receive(self):
+        while True:
+            try:
+                message = self.client_socket.recv(1024).decode('utf-8')
+                print(message)
+            except:
+                break
 
-#receive and send message from/to different user/s
+    def send(self, message):
+        self.client_socket.send(message.encode('utf-8'))
 
-while True:
-    recv_msg = client_socket.recv(1024)
-    print recv_msg
-    send_msg = raw_input("Send your message in format [@user:message] ")
-    if send_msg == 'exit':
-        break;
-    else:
-        client_socket.send(send_msg)
+if __name__ == "__main__":
+    client = ChatClient('localhost', 12345)
+    client.connect()
 
-client_socket.close()
+    while True:
+        message = input()
+        client.send(message)

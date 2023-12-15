@@ -1,30 +1,53 @@
-import socket,select
+import socket
+import threading
 
-port = 12345
-socket_list = []
-users = {}
-server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-server_socket.bind(('',port))
-server_socket.listen(5)
-socket_list.append(server_socket)
-while True:
-    ready_to_read,ready_to_write,in_error = select.select(socket_list,[],[],0)
-    for sock in ready_to_read:
-        if sock == server_socket:
-            connect, addr = server_socket.accept()
-            socket_list.append(connect)
-            connect.send("You are connected from:" + str(addr))
-        else:
+class ChatServer:
+    def __init__(self, host, port):
+        self.host = host
+        self.port = port
+        self.clients = []
+        self.leader_election = None  # Referenz zur LeaderElection-Klasse
+        self.lock = threading.Lock()
+
+    def start(self):
+        server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server_socket.bind((self.host, self.port))
+        server_socket.listen()
+
+        print(f"Server listening on {self.host}:{self.port}")
+
+        while True:
+            client_socket, addr = server_socket.accept()
+            client_thread = threading.Thread(target=self.handle_client, args=(client_socket, addr))
+            client_thread.start()
+
+    def handle_client(self, client_socket, addr):
+        with self.lock:
+            self.clients.append(client_socket)
+
+        while True:
             try:
-                data = sock.recv(2048)
-                if data.startswith("#"):
-                    users[data[1:].lower()]=connect
-                    print "User " + data[1:] +" added."
-                    connect.send("Your user detail saved as : "+str(data[1:]))
-                elif data.startswith("@"):
-                    users[data[1:data.index(':')].lower()].send(data[data.index(':')+1:])
+                message = client_socket.recv(1024).decode('utf-8')
+                if not message:
+                    break
+                if message == "ELECTION":
+                    self.leader_election.start_election(client_socket)  # Initiieren der Leader Election
+                else:
+                    self.broadcast(message, client_socket)
             except:
-                continue
+                with self.lock:
+                    self.clients.remove(client_socket)
+                break
 
-server_socket.close()
+    def broadcast(self, message, sender_socket):
+        with self.lock:
+            for client_socket in self.clients:
+                if client_socket != sender_socket:
+                    try:
+                        client_socket.send(message.encode('utf-8'))
+                    except:
+                        pass
+
+if __name__ == "__main__":
+    server = ChatServer('localhost', 12345)
+    server.start()
