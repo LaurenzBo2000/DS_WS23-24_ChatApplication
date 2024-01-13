@@ -32,3 +32,7 @@ Important Notes
 1-Make sure the server is running before starting the clients.
 2-Each client must have a unique ID for proper functioning of the leader election algorithm.
 3-The server and clients must be run in separate terminal windows.
+
+Start Server:
+
+python3 /Users/LaurenzBorgmann/Dokumente\ /Hochschule\ Reutlingen/WS23:24/Distributed\ Systems/Projekt/Code/CA_server.py
