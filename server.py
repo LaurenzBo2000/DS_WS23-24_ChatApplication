@@ -27,15 +27,18 @@ import threading
 import selectors
 from heartbeat import HeartbeatChecker
 import logging
+import time
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 sel = selectors.DefaultSelector()
 heartbeat_checker = HeartbeatChecker()
 connections_lock = threading.Lock()
-connections = []
+connections = {}
+client_ids = {}
 
 def handle_client(conn, addr):
+    client_id = None
     logging.info(f"New connection from {addr}")
     connected = True
     while connected:
@@ -48,8 +51,22 @@ def handle_client(conn, addr):
                     continue
                 elif msg.startswith('ELECTION') or msg.startswith('LEADER'):
                     broadcast(msg, conn)
+                elif msg == 'QUIT':
+                    if client_id is not None:
+                        broadcast(f"Client {client_id} left the chat", conn)
+                    connected = False
+                elif msg == 'SIMULATE_CRASH':
+                    logging.info("Simulating server crash.")
+                    broadcast("SERVER_CRASH", conn)
+                    time.sleep(5) 
+                    logging.info("Server resumed after simulated crash.")
                 else:
-                    broadcast(msg, conn)
+                    if client_id is None:
+                        client_id = msg
+                        client_ids[conn] = client_id
+                        broadcast(f"Client {client_id} joined the chat", conn)
+                    else:
+                        broadcast(f"{client_ids[conn]}: {msg}", conn)
         except BlockingIOError:
             continue 
         except ConnectionResetError:
@@ -58,26 +75,31 @@ def handle_client(conn, addr):
         except Exception as e:
             logging.error(f"Error with {addr}: {e}")
             connected = False
+
     try:
         sel.unregister(conn)
     except KeyError:
         logging.warning("Connection not registered or already unregistered")
     with connections_lock:
         if conn in connections:
-            connections.remove(conn)
+            del connections[conn]  
+            if conn in client_ids:
+                del client_ids[conn]
     heartbeat_checker.remove_client(conn)
     conn.close()
 
 def broadcast(msg, sender_conn):
     with connections_lock:
-        for conn in connections[:]: 
+        for conn in connections.values(): 
             if conn is not sender_conn:
                 try:
                     conn.send(msg.encode('utf-8'))
                 except:
                     logging.error("Error in sending message, closing connection")
                     conn.close()
-                    connections.remove(conn)
+                    del connections[conn]
+                    if conn in client_ids:
+                        del client_ids[conn]
 
 def accept_wrapper(sock):
     try:
@@ -86,7 +108,7 @@ def accept_wrapper(sock):
         conn.setblocking(False)
         sel.register(conn, selectors.EVENT_READ, data=None)
         with connections_lock:
-            connections.append(conn)
+            connections[conn] = conn
         heartbeat_checker.update_heartbeat(conn)
         thread = threading.Thread(target=handle_client, args=(conn, addr))
         thread.start()
