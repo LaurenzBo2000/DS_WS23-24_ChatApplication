@@ -20,13 +20,10 @@ import logging
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def send_heartbeat(client_socket, interval=5):
-    """
-    Sends a heartbeat to the server every 'interval' seconds.
-    """
+def send_heartbeat(client_socket, stop_event, interval=5):
     logging.info("Heartbeat thread started")
 
-    while True:
+    while not stop_event.is_set():
         try:
             client_socket.sendall(b'HEARTBEAT')
             time.sleep(interval)
@@ -68,8 +65,3 @@ class HeartbeatChecker:
         while True:
             self.check_heartbeats()
             time.sleep(5)
-
-def periodic_heartbeat_check(heartbeat_checker):
-    while True:
-        heartbeat_checker.check_heartbeats()
-        time.sleep(5)
