@@ -16,6 +16,7 @@ class HeartbeatChecker:
             self.server_heartbeats[server_socket] = time.time()
             logging.info(f"Server heartbeat updated for {server_socket.getpeername()}")
 
+
     def check_heartbeats(self):
         current_time = time.time()
         with self.lock:
