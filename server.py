@@ -1,229 +1,140 @@
 import socket
 import threading
-import selectors
-import logging
-import config
-import os
 import time
-from heartbeat import HeartbeatChecker
-from lcr_leader_election import lcr_initiate, lcr_process_message, elect_new_leader
+import uuid
+import random
+import config
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+serverIP = config.SERVER
 
-sel = selectors.DefaultSelector()
-heartbeat_checker = HeartbeatChecker()
-server_lock = threading.Lock()
-servers = {}
-leader_server = None
-is_leader = False
-clients = {}
+class Server:
+    def __init__(self, port):
+        self.uuid = uuid.uuid4()
+        self.host = serverIP
+        self.port = port
+        self.leader = None
+        self.active_servers = {} 
+        self.clients = {}
+        self.is_leader = False
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.socket.bind((self.host, self.port))
 
-def get_own_id():
-    return f"{socket.gethostname()}-{os.getpid()}"
-
-def broadcast_to_clients(message, sender_id=None):
-    with server_lock:
-        logging.info(f"Broadcasting message to clients: {message}")
-        for client_id, conn in clients.items():
-            if client_id != sender_id:
+    def broadcast_to_servers(self, message):
+        for server_address in self.active_servers:
+            if server_address != (self.host, self.port):
                 try:
-                    conn.send(message.encode('utf-8'))
+                    self.socket.sendto(message.encode(), server_address)
                 except Exception as e:
-                    logging.error(f"Error broadcasting to client {client_id}: {e}")
-                    remove_client(conn, client_id)
+                    print(f"Error sending to {server_address}: {e}")
 
+    def broadcast_to_clients(self, message, exclude=None):
+        for client_address in self.clients:
+            if exclude is None or client_address != exclude:
+                self.socket.sendto(message.encode(), client_address)
 
-def handle_client(conn, client_id):
-    global clients
-    logging.info(f"New client connection: {client_id}")
-    clients[client_id] = conn
+    def send_heartbeat(self):
+        while True:
+            heartbeat_message = f"heartbeat:{self.host}:{self.port}:{self.uuid}"
+            print(f"Sending heartbeat: {heartbeat_message}")
+            self.broadcast_to_servers(heartbeat_message)
+            time.sleep(3)  
 
-    while True:
-        try:
-            msg = conn.recv(1024).decode('utf-8')
-            if msg:
-                logging.info(f"Received message from client {client_id}: {msg}")
-                broadcast_to_clients(msg, client_id)
-            else:
-                break
-        except Exception as e:
-            logging.error(f"Error with client {client_id}: {e}")
-            break
-
-    remove_client(conn, client_id)
-
-def remove_client(conn, client_id):
-    with server_lock:
-        if client_id in clients:
-            del clients[client_id]
-            conn.close()
-            logging.info(f"Client {client_id} disconnected")
-
-def handle_discovery_request():
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.bind(('', config.DISCOVERY_PORT))
+    def listen(self):
         while True:
             try:
-                data, addr = s.recvfrom(1024)
-                if data == b'DISCOVER':
-                    s.sendto(f"LEADER:{get_own_id()}".encode(), addr)
+                message, address = self.socket.recvfrom(1024)
+                message = message.decode()
+                msg_type, *args = message.split(":")
+
+                if msg_type == "heartbeat":
+                    self.handle_heartbeat(*args, address)
+                elif msg_type == "new_leader":
+                    self.handle_new_leader(uuid.UUID(args[0]))
+                elif msg_type == "msg":
+                    self.handle_client_message(address, ":".join(args))
+                elif msg_type == "join":
+                    self.clients[address] = args[0]
+                    self.broadcast_to_clients(f"{args[0]} joined the chat.", exclude=address)
+                elif msg_type == "test":
+                    self.socket.sendto("ack".encode(), address)
             except Exception as e:
-                logging.error(f"Error in discovery request handling: {e}")
-
-def handle_server(conn, addr):
-    global leader_server, is_leader, servers
-    server_id = None
-    client_id = None
-    logging.info(f"New server connection from {addr}")
-    connected = True
-
-    while connected:
-        try:
-            msg = conn.recv(1024).decode('utf-8')
-            if msg:
-                logging.info(f"Received message from server {addr}: {msg}")
-                if msg == 'HEARTBEAT':
-                    heartbeat_checker.update_server_heartbeat(conn)
-                elif msg.startswith('ELECTION'):
-                    _, server_id = msg.split(maxsplit=1)
-                    lcr_initiate(conn, server_id)
-                elif msg.startswith('LEADER'):
-                    leader_server = lcr_process_message(msg, conn, server_id, servers)
-                    is_leader = leader_server == get_own_id()
-                elif msg.startswith('CLIENT_ID'):
-                    client_id = msg.split(' ', 1)[1]
-                    logging.info(f"Received client ID from {addr}: {client_id}")
-                    handle_client(conn, client_id)
-                elif msg == 'QUIT':
-                    connected = False
-        except BlockingIOError:
-            continue
-        except ConnectionResetError:
-            logging.warning(f"Connection lost with server {addr}")
-            connected = False
-        except Exception as e:
-            logging.error(f"Error with server {addr}: {e}")
-            connected = False
-
-    remove_server(conn, addr, server_id)
+                print(f"Error receiving message: {e}")
 
 
-def remove_server(conn, addr=None, server_id=None):
-    global leader_server
-    with server_lock:
-        if conn in servers:
-            del servers[conn]
-            conn.close()
+    def handle_heartbeat(self, host, port, server_uuid, address):
+        server_uuid = uuid.UUID(server_uuid)
+        self.active_servers[address] = (host, int(port), server_uuid)
+        print(f"Heartbeat received from server {server_uuid} at {address}")  
+        self.check_leader()
 
-        if server_id and server_id == leader_server:
-            new_leader_id = elect_new_leader(servers)
-            if new_leader_id:
-                leader_server = new_leader_id
-                broadcast_to_servers(f"NEW_LEADER {new_leader_id}")
+    def analyze_traffic(self):
+        traffic_data = random.sample(range(100), 10)
+        average_traffic = sum(traffic_data) / len(traffic_data)
+        print(f"Average traffic: {average_traffic} requests per second")
 
-    if addr:
-        logging.info(f"Server connection closed with {addr}")
-    if server_id:
-        logging.info(f"Server {server_id} disconnected")
+    def handle_new_leader(self, server_uuid):
+        if server_uuid == self.uuid:
+            self.is_leader = True
+            print("I am the new leader.")
 
-def start_leader_role():
-    global is_leader, leader_server
-    is_leader = True
-    leader_server = get_own_id()
-    logging.info("Server is now acting as the leader")
-    broadcast_to_servers(f"NEW_LEADER {get_own_id()}")
+    def handle_client_message(self, client_address, message):
+        client_id = self.clients.get(client_address, "Unknown")
+        formatted_message = f"{client_id}: {message}"
+        print(formatted_message)
+        self.broadcast_to_clients(formatted_message, exclude=client_address)
 
-def start_follower_role(leader_addr):
-    global is_leader
-    is_leader = False
-    try:
-        leader_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        leader_socket.connect((leader_addr, config.SERVER_PORT))
-        logging.info(f"Connected to leader server at {leader_addr}")
-        thread = threading.Thread(target=handle_server, args=(leader_socket, (leader_addr, config.SERVER_PORT)))
-        thread.start()
-    except Exception as e:
-        logging.error(f"Error connecting to leader server: {e}")
+    def update_server_heartbeat(self, server_socket):
+        with self.lock:
+            self.server_heartbeats[server_socket] = time.time()
 
-def monitor_leader_heartbeat():
-    global leader_server, is_leader, servers
-    while not is_leader:
-        time.sleep(config.LEADER_HEARTBEAT_TIMEOUT)
-        if heartbeat_checker.is_leader_heartbeat_missing():
-            logging.warning("Leader heartbeat missing. Initiating leader election.")
-            if len(servers) > 1:
-                new_leader = elect_new_leader(servers)
-                if new_leader == get_own_id():
-                    start_leader_role()
-                else:
-                    start_follower_role(str(new_leader))
-            else:
-                start_leader_role()
-                broadcast_to_servers(f"NEW_LEADER {get_own_id()}", None)
+    def check_heartbeats(self):
+        current_time = time.time()
+        with self.lock:
+            to_remove_servers = [server_socket for server_socket, timestamp in self.server_heartbeats.items()
+                                 if current_time - timestamp > 5]
+            for server_socket in to_remove_servers:
+                self.remove_server(server_socket)
 
+    def check_leader(self):
+        if not self.active_servers or self.uuid == max(self.active_servers.values(), key=lambda x: x[2])[2]:
+            self.become_leader()
 
-def get_next_available_port(start_port):
-    while True:
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.bind(("", start_port))
-                return start_port
-        except OSError:
-            start_port += 1
+    def become_leader(self):
+        if not self.is_leader:  
+            self.is_leader = True   
+            self.leader = self.uuid 
+            print("I am the leader.")
+            self.broadcast_to_servers(f"new_leader::{self.uuid}")
 
-def initialize_server():
-    global SERVER_PORT  
-    SERVER_PORT = get_next_available_port(config.SERVER_PORT)
-    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server_socket.bind(('0.0.0.0', SERVER_PORT))
-    server_socket.listen(100)
-    server_socket.setblocking(False)
-    sel.register(server_socket, selectors.EVENT_READ, data=None)
+    def is_leader_heartbeat_missing(self):
+        current_time = time.time()
+        with self.lock:
+            for _, timestamp in self.server_heartbeats.items():
+                if current_time - timestamp <= 5:
+                    return False
+            return True
 
-    logging.info(f"Server is listening on {config.SERVERS[0]}:{SERVER_PORT}")
+    def start_heartbeat_checking(self):
+        while True:
+            self.check_heartbeats()
+            time.sleep(5)
 
-    heartbeat_thread = threading.Thread(target=heartbeat_checker.start_heartbeat_checking)
-    leader_heartbeat_thread = threading.Thread(target=monitor_leader_heartbeat)
+    def run(self):
+        print(f"Server running on {self.host}:{self.port} with UUID {self.uuid}")
+        if self.port == 5000:
+            self.become_leader()
+        threading.Thread(target=self.listen, daemon=True).start()
+        threading.Thread(target=self.send_heartbeat, daemon=True).start()
 
-    heartbeat_thread.start()
-    leader_heartbeat_thread.start()
-
+def main():
+    port = int(input("Enter port number for this server: "))
+    server = Server(port)
+    server.run()
     try:
         while True:
-            events = sel.select(timeout=None)
-            for key, mask in events:
-                if key.fileobj is server_socket:
-                    accept_server_connection(key.fileobj)
+            time.sleep(1)
     except KeyboardInterrupt:
-        logging.info("Server is shutting down.")
-    finally:
-        sel.close()
-        server_socket.close()
+        print("Server shutting down.")
 
-def broadcast_to_servers(msg, sender_conn=None):
-    with server_lock:
-        for conn in servers.values():
-            if conn != sender_conn:
-                try:
-                    conn.send(msg.encode('utf-8'))
-                except Exception as e:
-                    logging.error(f"Error in sending message to server: {e}")
-                    remove_server(conn)
-
-def accept_server_connection(sock):
-    conn, addr = sock.accept()
-    logging.info(f"Accepted server connection from {addr}")
-    conn.setblocking(False)
-    sel.register(conn, selectors.EVENT_READ, data=None)
-    with server_lock:
-        servers[conn] = conn
-    heartbeat_checker.update_server_heartbeat(conn)
-    thread = threading.Thread(target=handle_server, args=(conn, addr))
-    thread.start()
-
-if __name__ == '__main__':
-    discovery_thread = threading.Thread(target=handle_discovery_request)
-    discovery_thread.start()
-    initialize_server()
+if __name__ == "__main__":
+    main()
