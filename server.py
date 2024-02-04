@@ -11,6 +11,7 @@ serverIP = config.SERVER
 
 #Define the Server class
 class Server:
+
     #Initialize the Server object with a given port
     def __init__(self, port):
         self.uuid = uuid.uuid4()
@@ -32,7 +33,7 @@ class Server:
                 except Exception as e:
                     print(f"Error sending to {server_address}: {e}")
 
-    #Method to broadcast a message to all clients (excluding a specific client)
+    #Method to broadcast a message to all clients
     def broadcast_to_clients(self, message, exclude=None):
         for client_address in self.clients:
             if exclude is None or client_address != exclude:
