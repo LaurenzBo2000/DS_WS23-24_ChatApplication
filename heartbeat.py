@@ -2,7 +2,6 @@
 import threading
 import time
 import logging
-import socket
 import config
 
 logging.basicConfig(level=logging.getLevelName(config.LOG_LEVEL), format=config.LOG_FORMAT)

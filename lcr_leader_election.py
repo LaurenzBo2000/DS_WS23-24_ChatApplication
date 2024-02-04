@@ -1,8 +1,6 @@
 #import necessary libraries
 import logging
-import socket
 import config
-import random
 
 logging.basicConfig(level=logging.getLevelName(config.LOG_LEVEL), format=config.LOG_FORMAT)
 
